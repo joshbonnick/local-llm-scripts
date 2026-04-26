@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MODEL="qwen3.5:4b"
+OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+
+COMMAND="${1:-}"
+
+if [ -z "$COMMAND" ]; then
+  echo "Usage: tldr-man <command>"
+  echo "  e.g. tldr-man curl"
+  exit 1
+fi
+
+# Fetch the man page as plain text
+MAN_TEXT=$(man "$COMMAND" 2>/dev/null | col -bx) || {
+  echo "No man page found for '$COMMAND'"
+  exit 1
+}
+
+PROMPT=$(cat <<EOF
+You are a concise command-line reference assistant.
+
+Given the man page below, produce a short cheat sheet for '$COMMAND' with:
+- One line description of what it does
+- The most common usage patterns (3-6 examples) with a brief comment on each
+- The most useful flags, in a compact table: flag | what it does
+- One "pro tip" if there's something non-obvious worth knowing
+
+Be terse. No waffle. Format for a terminal (no markdown headers, use plain text + indentation).
+
+Man page:
+$MAN_TEXT
+EOF
+)
+
+echo ""
+echo "tldr: $COMMAND"
+echo "================================"
+
+curl -sf "$OLLAMA_HOST/api/generate" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
+    '{model: $model, prompt: $prompt, think: false}')" \
+  | while IFS= read -r line; do
+      chunk=$(echo "$line" | jq -r '.response // empty')
+      printf "%s" "$chunk"
+    done
+
+echo ""
+echo "================================"
