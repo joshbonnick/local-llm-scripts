@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MODEL="qwen3.5:4b"
+OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+
+COPY_TO_CLIPBOARD=false
+
+# ----------------------------------------
+# Parse arguments
+# ----------------------------------------
+for arg in "$@"; do
+  case "$arg" in
+    -c|--clip)
+      COPY_TO_CLIPBOARD=true
+      shift
+      ;;
+    *)
+      echo "Unknown option: $arg"
+      exit 1
+      ;;
+  esac
+done
+
+# ----------------------------------------
+# Clipboard helper
+# ----------------------------------------
+copy_to_clipboard() {
+  local content="$1"
+
+  if command -v wl-copy >/dev/null 2>&1; then
+    printf "%s" "$content" | wl-copy
+  elif command -v xclip >/dev/null 2>&1; then
+    printf "%s" "$content" | xclip -selection clipboard
+  elif command -v pbcopy >/dev/null 2>&1; then
+    printf "%s" "$content" | pbcopy
+  else
+    echo "No clipboard utility found (wl-copy, xclip, pbcopy)." >&2
+    return 1
+  fi
+}
+
+# ----------------------------------------
+# Git context
+# ----------------------------------------
+GIT_BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+GIT_DIFF=$(git diff --cached --no-color)
+
+if [ -z "$GIT_DIFF" ]; then
+  GIT_DIFF=$(git diff --no-color)
+fi
+
+if [ -z "$GIT_DIFF" ]; then
+  echo "No staged changes found. Did you run 'git add'?"
+  exit 1
+fi
+
+# ----------------------------------------
+# Full file context for modified files
+# ----------------------------------------
+build_file_context() {
+  local staged="$1"  # "true" = staged files, "false" = unstaged
+
+  if [ "$staged" = "true" ]; then
+    mapfile -t MODIFIED_FILES < <(git diff --cached --name-only --diff-filter=ACMR)
+  else
+    mapfile -t MODIFIED_FILES < <(git diff --name-only --diff-filter=ACMR)
+  fi
+
+  local context=""
+  for file in "${MODIFIED_FILES[@]}"; do
+    if [ -f "$file" ]; then
+      context+="### $file"$'\n'
+      context+='```'$'\n'
+      context+="$(cat "$file")"$'\n'
+      context+='```'$'\n\n'
+    fi
+  done
+
+  printf "%s" "$context"
+}
+
+# Mirror the same staged/unstaged logic used for the diff
+if git diff --cached --quiet; then
+  FILE_CONTEXT=$(build_file_context "false")
+else
+  FILE_CONTEXT=$(build_file_context "true")
+fi
+
+# ----------------------------------------
+# Prompt
+# ----------------------------------------
+PROMPT=$(cat <<EOF
+You are writing a git commit message for software.
+
+# Context
+Branch name: $GIT_BRANCH_NAME
+
+Staged diff:
+$GIT_DIFF
+
+Full content of modified files (for broader context):
+$FILE_CONTEXT
+
+# Instructions
+- Extract the ticket number from the branch name if present
+- Use imperative mood (e.g. "Add", "Fix", "Refactor")
+- Subject line max 50 characters
+- No trailing period
+- Focus on what changed and why
+- Avoid vague phrases like "update stuff"
+- Be specific enough for future readers to understand context
+
+# Output format
+- First line: concise summary (<=50 chars)
+- Output ONLY the commit message, no explanation or preamble
+EOF
+)
+
+# ----------------------------------------
+# Call Ollama (streaming)
+# ----------------------------------------
+COMMIT_MESSAGE=$(
+  curl -sf "$OLLAMA_HOST/api/generate" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg model "$MODEL" --arg prompt "$PROMPT" \
+      '{model: $model, prompt: $prompt, think: false}')" \
+    | while IFS= read -r line; do
+        chunk=$(echo "$line" | jq -r '.response // empty')
+        printf "%s" "$chunk"
+      done
+)
+
+printf "%s\n" "$COMMIT_MESSAGE"
+
+# ----------------------------------------
+# Optional clipboard copy
+# ----------------------------------------
+if [ "$COPY_TO_CLIPBOARD" = true ]; then
+  copy_to_clipboard "$COMMIT_MESSAGE" && echo "Copied to clipboard."
+fi
