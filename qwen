@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MODEL="qwen3.5:4b"
+OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+
+# ----------------------------------------
+# Parse flags
+# ----------------------------------------
+RAW=false
+ARGS=()
+
+for arg in "$@"; do
+  if  [[ "$arg" == "--raw" ]]; then
+    RAW=true
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+# ----------------------------------------
+# Resolve prompt (args > stdin)
+# ----------------------------------------
+if [ "$#" -gt 0 ]; then
+  USER_PROMPT="$*"
+elif [ ! -t 0 ]; then
+  USER_PROMPT="$(cat)"
+else
+  echo "Usage:"
+  echo "  $0 [--speak] \"your prompt\""
+  echo "  echo \"prompt\" | $0 [--speak]"
+  exit 1
+fi
+
+# ----------------------------------------
+# Load system prompt
+# ----------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYSTEM_PROMPT="$(cat "$SCRIPT_DIR/SYSTEM_PROMPT.md")"
+
+# Combine prompts
+PROMPT="${SYSTEM_PROMPT}
+
+${USER_PROMPT}"
+
+# ----------------------------------------
+# Stream response
+# ----------------------------------------
+RESPONSE="$(
+  curl -sN "$OLLAMA_HOST/api/generate" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+          --arg model "$MODEL" \
+          --arg prompt "$PROMPT" \
+          '{model: $model, prompt: $prompt, stream: true, think: false}')" \
+  | while IFS= read -r line; do
+      chunk=$(jq -r '.response // empty' <<<"$line")
+      printf "%s" "$chunk"
+    done
+)"
+
+if [[ "$RAW" == true ]]; then
+  printf "%s\n" "$RESPONSE"
+else
+  # Display via glow
+  printf "%s\n" "$RESPONSE" | glow -w 200 -
+fi
+
+printf "\n"
