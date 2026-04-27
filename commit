@@ -16,6 +16,10 @@ for arg in "$@"; do
       COPY_TO_CLIPBOARD=true
       shift
       ;;
+    -m|--model)
+      MODEL="$2"
+      shift # Skip the next argument (the model name)
+      ;;
     *)
       echo "Unknown option: $arg"
       exit 1
