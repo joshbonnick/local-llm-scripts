@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MODEL="gemma4:e4b"
+OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+
+# ----------------------------------------
+# Flags
+# ----------------------------------------
+SPEAK=false
+RAW=false
+STREAM=false
+ARGS=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --speak)  SPEAK=true ;;
+    --raw)    RAW=true ;;
+    --stream) STREAM=true ;;
+    *)        ARGS+=("$arg") ;;
+  esac
+done
+
+set -- "${ARGS[@]}"
+
+# ----------------------------------------
+# Input handling
+# ----------------------------------------
+PIPED_INPUT=""
+ARG_INPUT=""
+USER_PROMPT=""
+
+if [[ ! -t 0 ]]; then
+  PIPED_INPUT="$(cat)"
+fi
+
+if [[ $# -gt 0 ]]; then
+  ARG_INPUT="$*"
+fi
+
+if [[ -n "$PIPED_INPUT" && -n "$ARG_INPUT" ]]; then
+  USER_PROMPT="${PIPED_INPUT}"$'\n\n'"${ARG_INPUT}"
+elif [[ -n "$PIPED_INPUT" ]]; then
+  USER_PROMPT="$PIPED_INPUT"
+elif [[ -n "$ARG_INPUT" ]]; then
+  USER_PROMPT="$ARG_INPUT"
+else
+  echo "Usage:"
+  echo "  $0 [--stream] [--raw] [--speak] \"your prompt\""
+  echo "  echo \"prompt\" | $0 [--stream]"
+  exit 1
+fi
+
+# ----------------------------------------
+# Payload
+# ----------------------------------------
+PAYLOAD="$(jq -n \
+  --arg model "$MODEL" \
+  --arg prompt "$USER_PROMPT" \
+  --argjson stream "$STREAM" \
+  '{
+    model: $model,
+    prompt: $prompt,
+    stream: $stream,
+    think: false
+  }'
+)"
+
+# ----------------------------------------
+# Request
+# ----------------------------------------
+if [[ "$STREAM" == true ]]; then
+  # STREAM MODE
+  curl -sN "$OLLAMA_HOST/api/generate" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" |
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    chunk="$(jq -r '.response // empty' <<<"$line")"
+    printf "%s" "$chunk"
+  done
+
+  printf "\n"
+
+else
+  # NON-STREAM MODE
+  RESPONSE="$(
+    curl -s "$OLLAMA_HOST/api/generate" \
+      -H "Content-Type: application/json" \
+      -d "$PAYLOAD" |
+    jq -r '.response // empty'
+  )"
+
+  if [[ "$RAW" == true ]]; then
+    printf "%s\n" "$RESPONSE"
+  else
+    printf "%s\n" "$RESPONSE" | glow -w 200 -
+  fi
+fi
